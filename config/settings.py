@@ -44,6 +44,10 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     # third-parties
     'django_celery_beat',
+    # local-apps
+    'telegram_account.apps.TelegramAccountConfig',
+    'crawler.apps.CrawlerConfig',
+    'sender.apps.SenderConfig',
 ]
 
 MIDDLEWARE = [
