@@ -1,0 +1,44 @@
+volumes:
+  postgres_ad_data:
+
+networks:
+  development-ad-network:
+
+services:
+  redis_ad:
+    image: redis:8.6.0
+    container_name: redis_ad
+    hostname: ${REDIS_HOST:?error}
+    restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD:?error} --port ${REDIS_PORT:?error}
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?error}
+      REDIS_PORT: ${REDIS_PORT:?error}
+    volumes:
+      - type: bind
+        source: ./redis.conf
+        target: /usr/local/etc/redis.conf
+        read_only: true
+    ports:
+      - ${REDIS_PORT:?error}:${REDIS_PORT:?error}
+
+  postgresql_ad:
+    image: pgvector/pgvector:pg18
+    container_name: postgresql_ad
+    hostname: ${POSTGRES_HOST}
+    command: -p ${POSTGRES_PORT}
+    restart: always
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB_NAME:?error}
+      - POSTGRES_USER=${POSTGRES_USERNAME:?error}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?error}
+    volumes:
+      - postgres_ad_data:/var/lib/postgresql
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - ${POSTGRES_PORT:?error}:${POSTGRES_PORT:?error}
+    healthcheck:
+      test: [CMD-SHELL, "sh -c 'pg_isready -U ${POSTGRES_USERNAME} -d ${POSTGRES_DB_NAME} -p ${POSTGRES_PORT}'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
