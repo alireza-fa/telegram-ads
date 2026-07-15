@@ -72,7 +72,4 @@ class TelegramAccount(BaseModel):
                 return True
             return False
 
-        if self.daily_messages_sent >= 25:
-            return False
-
         return True

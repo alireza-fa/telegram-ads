@@ -1,6 +1,7 @@
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 
 from common.models import BaseModel
 
@@ -8,7 +9,6 @@ from common.models import BaseModel
 class MessageType(models.TextChoices):
     TEXT = 'TEXT', _('Text Message')
     VOICE = 'VOICE', _('Voice Note')
-    # PHOTO = 'PHOTO', _('Photo')
 
 
 class MessageTemplate(BaseModel):
@@ -27,14 +27,12 @@ class MessageTemplate(BaseModel):
         verbose_name=_("Message Type")
     )
 
-    # Text Content
     text_content = models.TextField(
         blank=True,
         verbose_name=_("Text Content"),
         help_text=_("The message text. Can also be used as a caption for voice/media.")
     )
 
-    # Voice File Handling
     voice_file = models.FileField(
         upload_to='sender/voices/',
         blank=True,
@@ -59,6 +57,7 @@ class MessageTemplate(BaseModel):
 
     def clean(self):
         super().clean()
+
         if self.message_type == MessageType.TEXT and not self.text_content:
             raise ValidationError({"text_content": _("Text content is required for Text messages.")})
 
@@ -83,7 +82,6 @@ class SenderTask(BaseModel):
         verbose_name=_("Campaign Title")
     )
 
-    # 1. Execution Settings
     execution_accounts = models.ManyToManyField(
         'telegram_account.TelegramAccount',
         blank=True,
@@ -92,7 +90,6 @@ class SenderTask(BaseModel):
         help_text=_("Accounts to rotate for sending messages. If empty, the system can auto-select active ones.")
     )
 
-    # 2. Target Filters
     target_sources = models.ManyToManyField(
         'crawler.TelegramSource',
         related_name="sender_tasks",
@@ -105,15 +102,13 @@ class SenderTask(BaseModel):
         help_text=_("Target only Telegram Premium users.")
     )
 
-    # 3. Message Configuration (using intermediate model for ordering)
     messages = models.ManyToManyField(
-        MessageTemplate,
+        'sender.MessageTemplate',
         through='TaskMessage',
         related_name='sender_tasks',
         verbose_name=_("Messages to Send")
     )
 
-    # 4. Limits and Delays (Crucial for Anti-Spam)
     daily_limit_per_account = models.PositiveIntegerField(
         default=25,
         verbose_name=_("Daily Limit Per Account"),
@@ -125,7 +120,6 @@ class SenderTask(BaseModel):
         help_text=_("Base delay between messages. System will add random jitter to this.")
     )
 
-    # 5. Status Tracking
     status = models.CharField(
         max_length=20,
         choices=SenderTaskStatus.choices,
@@ -137,14 +131,67 @@ class SenderTask(BaseModel):
         default=0,
         verbose_name=_("Total Users Messaged")
     )
+    error_message = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("Error Message")
+    )
+    started_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("Started At")
+    )
+    completed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("Completed At")
+    )
 
     class Meta:
         verbose_name = _("Sender Task")
         verbose_name_plural = _("Sender Tasks")
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["status", "-created_at"]),
+        ]
 
     def __str__(self):
         return f"{self.title} | Status: {self.status}"
+
+    def clean(self):
+        super().clean()
+
+        if self.daily_limit_per_account <= 0:
+            raise ValidationError({
+                "daily_limit_per_account": _("Daily limit per account must be greater than zero.")
+            })
+
+        if self.delay_between_messages <= 0:
+            raise ValidationError({
+                "delay_between_messages": _("Delay between messages must be greater than zero.")
+            })
+
+    def mark_processing(self):
+        self.status = SenderTaskStatus.PROCESSING
+        if not self.started_at:
+            self.started_at = timezone.now()
+        self.error_message = ""
+        self.save(update_fields=["status", "started_at", "error_message", "updated_at"])
+
+    def mark_failed(self, message: str):
+        self.status = SenderTaskStatus.FAILED
+        self.error_message = message or ""
+        self.completed_at = timezone.now()
+        self.save(update_fields=["status", "error_message", "completed_at", "updated_at"])
+
+    def mark_completed(self):
+        self.status = SenderTaskStatus.COMPLETED
+        self.completed_at = timezone.now()
+        self.save(update_fields=["status", "completed_at", "updated_at"])
+
+    def mark_paused(self):
+        self.status = SenderTaskStatus.PAUSED
+        self.save(update_fields=["status", "updated_at"])
 
 
 class TaskMessage(BaseModel):
@@ -164,7 +211,6 @@ class TaskMessage(BaseModel):
         verbose_name = _("Task Message")
         verbose_name_plural = _("Task Messages")
         ordering = ['task', 'order']
-        # Prevent assigning the exact same order number to two messages in the same task
         unique_together = ('task', 'order')
 
     def __str__(self):

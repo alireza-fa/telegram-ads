@@ -7,9 +7,7 @@ from .models import (
     TaskMessage,
     SenderTaskStatus
 )
-
-
-# from .tasks import process_sender_task
+from .tasks import process_sender_task
 
 
 @admin.register(MessageTemplate)
@@ -18,7 +16,7 @@ class MessageTemplateAdmin(admin.ModelAdmin):
     list_filter = ('message_type', 'created_at')
     search_fields = ('title', 'text_content')
 
-    readonly_fields = ('telegram_file_id', 'created_at', 'updated_at')
+    readonly_fields = ('telegram_file_id', 'telegram_id_info', 'created_at', 'updated_at')
 
     fieldsets = (
         ('Basic Info', {
@@ -34,24 +32,18 @@ class MessageTemplateAdmin(admin.ModelAdmin):
         }),
     )
 
+    @admin.display(boolean=True, description="Has Voice")
     def has_voice_file(self, obj):
         return bool(obj.voice_file)
 
-    has_voice_file.boolean = True
-    has_voice_file.short_description = "Has Voice"
-
+    @admin.display(description="Cache Status")
     def telegram_id_info(self, obj):
         if obj.telegram_file_id:
-            return f"Cached ID: {obj.telegram_file_id[:15]}..."
+            return f"Cached ID: {str(obj.telegram_file_id)[:15]}..."
         return "No File ID cached yet."
-
-    telegram_id_info.short_description = "Cache Status"
 
 
 class TaskMessageInline(admin.TabularInline):
-    """
-    Allows adding and ordering messages directly inside the SenderTask admin page.
-    """
     model = TaskMessage
     extra = 1
     ordering = ('order',)
@@ -65,17 +57,21 @@ class SenderTaskAdmin(admin.ModelAdmin):
         'status',
         'users_messaged',
         'daily_limit_per_account',
+        'started_at',
+        'completed_at',
         'created_at'
     )
     list_filter = ('status', 'only_premium_users', 'created_at')
     search_fields = ('title',)
 
     filter_horizontal = ('execution_accounts', 'target_sources')
-
     inlines = [TaskMessageInline]
 
     readonly_fields = (
         'users_messaged',
+        'error_message',
+        'started_at',
+        'completed_at',
         'created_at',
         'updated_at'
     )
@@ -95,7 +91,7 @@ class SenderTaskAdmin(admin.ModelAdmin):
             'fields': ('daily_limit_per_account', 'delay_between_messages')
         }),
         ('Progress (Read-Only)', {
-            'fields': ('users_messaged',),
+            'fields': ('users_messaged', 'error_message', 'started_at', 'completed_at'),
         }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at'),
@@ -115,11 +111,12 @@ class SenderTaskAdmin(admin.ModelAdmin):
 
         updated_count = tasks_to_restart.update(
             status=SenderTaskStatus.PENDING,
+            error_message="",
+            completed_at=None,
         )
 
-        # TODO: Uncomment after creating sender/tasks.py
-        # for task_id in task_ids:
-        #     transaction.on_commit(lambda tid=task_id: process_sender_task.delay(tid))
+        for task_id in task_ids:
+            transaction.on_commit(lambda tid=task_id: process_sender_task.delay(tid))
 
         self.message_user(request, f"{updated_count} campaigns successfully restarted and sent to Celery.")
 
@@ -134,8 +131,20 @@ class SenderTaskAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj, form, change):
         is_new = obj.pk is None
+        previous_status = None
+
+        if change and obj.pk:
+            previous_status = SenderTask.objects.filter(pk=obj.pk).values_list('status', flat=True).first()
+
         super().save_model(request, obj, form, change)
 
-        # TODO: Uncomment after creating sender/tasks.py
-        # if is_new and obj.status == SenderTaskStatus.PENDING:
-        #     transaction.on_commit(lambda: process_sender_task.delay(obj.id))
+        should_enqueue = False
+
+        if is_new and obj.status == SenderTaskStatus.PENDING:
+            should_enqueue = True
+
+        if change and previous_status != SenderTaskStatus.PENDING and obj.status == SenderTaskStatus.PENDING:
+            should_enqueue = True
+
+        if should_enqueue:
+            transaction.on_commit(lambda: process_sender_task.delay(obj.id))

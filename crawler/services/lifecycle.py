@@ -178,7 +178,6 @@ class CrawlerLifecycleService:
             if user_entity.bot:
                 return
 
-            # FIXED: Updated the model fields to match the new CrawledUser definition
             CrawledUser.objects.create(
                 telegram_id=user_entity.id,
                 username=user_entity.username,
