@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'telegram_account.apps.TelegramAccountConfig',
     'crawler.apps.CrawlerConfig',
     'sender.apps.SenderConfig',
+    'common.apps.CommonConfig',
 ]
 
 MIDDLEWARE = [

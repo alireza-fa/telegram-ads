@@ -1,8 +1,10 @@
 from django.db import models
 from django.utils import timezone
 
+from common.models import BaseModel
 
-class TelegramAccount(models.Model):
+
+class TelegramAccount(BaseModel):
     phone_number = models.CharField(
         max_length=20,
         unique=True,
@@ -42,9 +44,6 @@ class TelegramAccount(models.Model):
         blank=True,
         verbose_name="last message sent at"
     )
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = "Telegram Account"
