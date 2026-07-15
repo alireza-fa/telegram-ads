@@ -2,6 +2,7 @@ import time
 import random
 
 from django.db import transaction
+from django.utils import timezone
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
 
@@ -23,7 +24,8 @@ class CrawlerLifecycleService:
         Assigns an execution account if not already assigned.
         """
         try:
-            task = CrawlerTask.objects.get(id=task_id)
+            # Optimize by selecting related source to avoid N+1 query issues
+            task = CrawlerTask.objects.select_related('source').get(id=task_id)
         except CrawlerTask.DoesNotExist:
             raise ValidationError(_("Crawler task not found."))
 
@@ -64,7 +66,7 @@ class CrawlerLifecycleService:
                 task.mark_failed("Account session is not authorized.")
                 return
 
-            # 1. Resolve Target (Join if necessary)
+            # 1. Resolve Target (Join if necessary) using the new Source relation
             target_entity = self._resolve_and_join_target(client, task)
 
             # 2. Begin Crawling Loop
@@ -72,11 +74,10 @@ class CrawlerLifecycleService:
             offset_id = task.last_message_id if task.last_message_id else 0
 
             # Using iter_messages to fetch history
-            # chunk_size handles how many messages Telethon asks for under the hood
             messages = client.iter_messages(
                 target_entity,
                 offset_id=offset_id,
-                reverse=False  # Start from older to newer (or adjust based on preference)
+                reverse=False  # Start from older to newer
             )
 
             for message in messages:
@@ -113,26 +114,31 @@ class CrawlerLifecycleService:
         except FloodWaitError as e:
             # Handle rate limiting gracefully
             task.mark_failed(f"FloodWaitError: Must wait {e.seconds} seconds.")
-            # Optionally sleep or schedule retry here based on celery config
 
         except Exception as e:
             task.mark_failed(f"Unexpected Error: {str(e)}")
 
         finally:
+            if task.source:
+                task.source.last_crawled_at = timezone.now()
+                task.source.save(update_fields=['last_crawled_at'])
+
             client.disconnect()
 
     def _resolve_and_join_target(self, client: TelegramClient, task: CrawlerTask):
         """
         Helper method to figure out the entity and join if it's a new link.
+        Accesses target details via the related TelegramSource model.
         """
-        if task.target_id:
-            # Already have the ID (assumes we are already participants)
-            return client.get_entity(task.target_id)
+        # FIXED: Accessing telegram_id via the source relation
+        if task.source.telegram_id:
+            return client.get_entity(task.source.telegram_id)
 
-        target = task.target_link
+        # FIXED: Accessing link via the source relation
+        target = task.source.link
 
         try:
-            # Handle private invite links (e.g., https://t.me/+AbCdEfGhIj)
+            # Handle private invite links
             if '/+' in target or 'joinchat' in target:
                 hash_part = target.split('/')[-1].replace('+', '')
                 try:
@@ -142,7 +148,6 @@ class CrawlerLifecycleService:
                 except InviteHashExpiredError:
                     raise ValueError("The invite link is expired.")
 
-                # Fetch entity after joining
                 return client.get_entity(target)
 
             # Handle public usernames/links
@@ -163,21 +168,17 @@ class CrawlerLifecycleService:
         """
         Fetches user details and saves to DB atomically.
         """
-        # Skip if already exists in DB to save API calls
+        # Skip if already exists in DB
         if CrawledUser.objects.filter(telegram_id=sender_id).exists():
             return
 
         try:
             user_entity = client.get_entity(sender_id)
 
-            # Filter bots if not wanted (you can adjust logic)
             if user_entity.bot:
                 return
 
-            # Filter admins if setting is applied
-            # (Note: Checking admin status per user requires extra API calls,
-            # for now we rely on basic profile extraction)
-
+            # FIXED: Updated the model fields to match the new CrawledUser definition
             CrawledUser.objects.create(
                 telegram_id=user_entity.id,
                 username=user_entity.username,
@@ -187,18 +188,15 @@ class CrawlerLifecycleService:
                 is_premium=getattr(user_entity, 'premium', False),
                 is_bot=user_entity.bot,
                 source_task=task,
-                source_group_link=task.target_link,
+                source_chat=task.source,
                 crawled_by_account=account,
                 status=TargetUserStatus.PENDING
             )
 
-            # Safely increment counter
-            task.source.last_crawled_at = timezone.now()
-            task.source.save(update_fields=['last_crawled_at'])
+            task.users_crawled += 1
+            task.save(update_fields=['users_crawled'])
 
         except ValueError:
-            # Usually means user entity can't be resolved (deleted account etc.)
             pass
         except Exception:
-            # Handle unique constraint violations silently if it slipped past the exists() check
             pass
