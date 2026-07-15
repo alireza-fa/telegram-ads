@@ -6,6 +6,66 @@ from django.core.exceptions import ValidationError
 from common.models import BaseModel
 
 
+class SourceChatType(models.TextChoices):
+    GROUP = 'GROUP', _('Group / Supergroup')
+    CHANNEL = 'CHANNEL', _('Channel')
+
+
+class TelegramSource(BaseModel):
+    """
+    Model to store and manage target groups or channels as sources for marketing.
+    """
+    title = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name=_("Chat Title"),
+        help_text=_("Name of the group/channel for easy identification.")
+    )
+
+    # One of these must be provided
+    link = models.CharField(
+        max_length=255,
+        unique=True,
+        verbose_name=_("Link or Username"),
+        help_text=_("Public username (@group) or private invite link.")
+    )
+    telegram_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        unique=True,
+        verbose_name=_("Telegram Chat ID"),
+        help_text=_("Internal Telegram ID if resolved.")
+    )
+
+    chat_type = models.CharField(
+        max_length=20,
+        choices=SourceChatType.choices,
+        default=SourceChatType.GROUP,
+        verbose_name=_("Chat Type")
+    )
+
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name=_("Is Active"),
+        help_text=_("Uncheck to stop crawling or messaging users from this source.")
+    )
+
+    last_crawled_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("Last Crawled At")
+    )
+
+    class Meta:
+        verbose_name = _("Telegram Source")
+        verbose_name_plural = _("Telegram Sources")
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.title or self.link
+
+
 class CrawlerTaskStatus(models.TextChoices):
     PENDING = 'PENDING', _('Pending')
     PROCESSING = 'PROCESSING', _('Processing')
@@ -36,16 +96,19 @@ class CrawlerTask(BaseModel):
     )
 
     # 2. Target Configuration
-    target_link = models.CharField(
-        max_length=255,
-        verbose_name=_("Target Link/Username"),
-        help_text=_("Telegram public link, username, or invite link.")
+    source = models.ForeignKey(
+        'crawler.TelegramSource',
+        on_delete=models.CASCADE,
+        related_name="crawler_tasks",
+        verbose_name=_("Target Source"),
+        help_text=_("The group or channel to crawl.")
     )
-    source_type = models.CharField(
+
+    crawl_method = models.CharField(
         max_length=50,
         choices=CrawlerSourceType.choices,
         default=CrawlerSourceType.GROUP_HISTORY,
-        verbose_name=_("Source Type")
+        verbose_name=_("Crawl Method")
     )
 
     # 3. Limits and Filters
@@ -119,19 +182,19 @@ class CrawlerTask(BaseModel):
         ]
 
     def __str__(self):
-        return f"CrawlerTask<{self.target_link} | Status: {self.status}>"
+        # FIXED: target_link replaced with source.link
+        target = self.source.link if self.source else "No Source"
+        return f"CrawlerTask<{target} | Status: {self.status}>"
 
     def clean(self):
         super().clean()
 
-        # Validation for limits
         if self.target_user_count <= 0:
             raise ValidationError({"target_user_count": _("Target user count must be greater than zero.")})
 
         if self.message_scan_limit <= 0:
             raise ValidationError({"message_scan_limit": _("Message scan limit must be greater than zero.")})
 
-        # Status timeline validation
         if self.status == CrawlerTaskStatus.PROCESSING and self.completed_at:
             raise ValidationError({"completed_at": _("Processing task cannot have completed_at set.")})
 
@@ -169,7 +232,6 @@ class CrawledUser(BaseModel):
     Model to store extracted Telegram users (Marketing Leads).
     """
     # 1. Telegram Identifiers
-    # Using BigIntegerField because Telegram IDs exceed standard integer limits
     telegram_id = models.BigIntegerField(
         unique=True,
         verbose_name=_("Telegram ID")
@@ -220,14 +282,27 @@ class CrawledUser(BaseModel):
         null=True,
         blank=True,
         related_name='extracted_users',
-        verbose_name=_("Source Task"),
-        help_text=_("The crawler task that found this user.")
+        verbose_name=_("Source Task")
     )
-    source_group_link = models.CharField(
-        max_length=255,
+    source_chat = models.ForeignKey(
+        'crawler.TelegramSource',
+        on_delete=models.SET_NULL,
+        null=True,
         blank=True,
-        default="",
-        verbose_name=_("Source Group/Channel")
+        related_name='extracted_users',
+        verbose_name=_("Source Chat"),
+        help_text=_("The actual group/channel this user was found in.")
+    )
+
+    # FIXED: Added the missing crawled_by_account field
+    crawled_by_account = models.ForeignKey(
+        'telegram_account.TelegramAccount',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='extracted_leads',
+        verbose_name=_("Crawled By Account"),
+        help_text=_("The specific account that scraped this user. Useful for rotation logic.")
     )
 
     # 5. Marketing Pipeline Status
@@ -250,7 +325,7 @@ class CrawledUser(BaseModel):
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["status", "-created_at"]),
-            models.Index(fields=["source_group_link"]),
+            models.Index(fields=["source_chat"]),
         ]
 
     def __str__(self):
