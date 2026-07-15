@@ -40,11 +40,11 @@ class MessageTemplate(BaseModel):
         verbose_name=_("Voice File (.ogg)"),
         help_text=_("Must be an .ogg file with OPUS codec for Telegram Voice Notes.")
     )
-    telegram_file_id = models.CharField(
-        max_length=255,
+    telegram_file_cache = models.JSONField(
+        default=dict,
         blank=True,
-        verbose_name=_("Telegram File ID"),
-        help_text=_("Auto-filled after the first upload to prevent re-uploading and spam flags.")
+        verbose_name=_("Telegram File Cache"),
+        help_text=_("Stores message IDs per account. Format: {'account_id': message_id}")
     )
 
     class Meta:

@@ -118,7 +118,8 @@ class SenderLifecycleService:
             logger.exception("Unexpected sender execution error for SenderTask ID=%s", task_id)
             task.mark_failed(f"Unexpected Error: {str(exc)}")
 
-    def _get_target_users_queryset(self, task: SenderTask):
+    @staticmethod
+    def _get_target_users_queryset(task: SenderTask):
         source_ids = task.target_sources.values_list('id', flat=True)
 
         queryset = CrawledUser.objects.filter(
@@ -187,6 +188,7 @@ class SenderLifecycleService:
                     client=client,
                     template=template,
                     peer_entity=peer_entity,
+                    account=account,
                 )
 
                 intra_chain_delay = random.uniform(1.0, 2.5)
@@ -224,7 +226,8 @@ class SenderLifecycleService:
         finally:
             client.disconnect()
 
-    def _send_single_template(self, client: TelegramClient, template: MessageTemplate, peer_entity):
+    def _send_single_template(self, client: TelegramClient, template: MessageTemplate, peer_entity,
+                              account: TelegramAccount):
         if template.message_type == MessageType.TEXT:
             client.send_message(
                 entity=peer_entity,
@@ -233,16 +236,16 @@ class SenderLifecycleService:
             return
 
         if template.message_type == MessageType.VOICE:
-            if not template.telegram_file_id:
-                self._cache_voice_in_saved_messages(client, template)
+            acc_id_str = str(account.id)
+            cached_msg_id = template.telegram_file_cache.get(acc_id_str)
+            cached_msg = None
 
-            cached_msg_id = int(template.telegram_file_id)
-            cached_msg = client.get_messages('me', ids=cached_msg_id)
+            if cached_msg_id:
+                cached_msg = client.get_messages('me', ids=int(cached_msg_id))
 
             if not cached_msg or not cached_msg.media:
-                self._cache_voice_in_saved_messages(client, template)
-                cached_msg_id = int(template.telegram_file_id)
-                cached_msg = client.get_messages('me', ids=cached_msg_id)
+                cached_msg_id = self._cache_voice_in_saved_messages(client, template, account)
+                cached_msg = client.get_messages('me', ids=int(cached_msg_id))
 
             client.send_file(
                 entity=peer_entity,
@@ -255,7 +258,8 @@ class SenderLifecycleService:
         raise ValidationError(_("Unsupported message type."))
 
     @staticmethod
-    def _cache_voice_in_saved_messages(client: TelegramClient, template: MessageTemplate):
+    def _cache_voice_in_saved_messages(client: TelegramClient, template: MessageTemplate,
+                                       account: TelegramAccount) -> int:
         if not template.voice_file:
             raise ValidationError(_("Voice template has no uploaded file."))
 
@@ -265,8 +269,16 @@ class SenderLifecycleService:
 
         msg = client.send_file('me', upload_path, voice_note=True)
 
-        template.telegram_file_id = str(msg.id)
-        template.save(update_fields=["telegram_file_id", "updated_at"])
+        acc_id_str = str(account.id)
+
+        template.refresh_from_db(fields=['telegram_file_cache'])
+        cache_data = template.telegram_file_cache or {}
+        cache_data[acc_id_str] = msg.id
+
+        template.telegram_file_cache = cache_data
+        template.save(update_fields=["telegram_file_cache", "updated_at"])
+
+        return msg.id
 
     @transaction.atomic
     def _mark_successful_send(self, user: CrawledUser, account: TelegramAccount):

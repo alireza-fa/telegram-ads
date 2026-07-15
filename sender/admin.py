@@ -16,7 +16,7 @@ class MessageTemplateAdmin(admin.ModelAdmin):
     list_filter = ('message_type', 'created_at')
     search_fields = ('title', 'text_content')
 
-    readonly_fields = ('telegram_file_id', 'telegram_id_info', 'created_at', 'updated_at')
+    readonly_fields = ('telegram_file_cache', 'telegram_id_info', 'created_at', 'updated_at')
 
     fieldsets = (
         ('Basic Info', {
@@ -27,7 +27,7 @@ class MessageTemplateAdmin(admin.ModelAdmin):
             'description': 'For VOICE type, upload an .ogg file. Telegram File ID will be generated automatically.'
         }),
         ('System Info', {
-            'fields': ('telegram_file_id', 'created_at', 'updated_at'),
+            'fields': ('telegram_file_cache', 'created_at', 'updated_at'),
             'classes': ('collapse',)
         }),
     )
@@ -38,8 +38,9 @@ class MessageTemplateAdmin(admin.ModelAdmin):
 
     @admin.display(description="Cache Status")
     def telegram_id_info(self, obj):
-        if obj.telegram_file_id:
-            return f"Cached ID: {str(obj.telegram_file_id)[:15]}..."
+        if obj.telegram_file_cache:
+            accounts_cached = len(obj.telegram_file_cache.keys())
+            return f"Cached in {accounts_cached} accounts"
         return "No File ID cached yet."
 
 
