@@ -14,8 +14,7 @@ A robust, asynchronous, and scalable Telegram cold outreach and marketing automa
 ## 🛠 Prerequisites
 
 * **Python:** `3.13`
-* **Database:** PostgreSQL / SQLite
-* **Message Broker:** Redis (Required for Celery)
+* **Docker & Docker Compose:** Required to run the backing services (PostgreSQL & Redis).
 
 ---
 
@@ -28,7 +27,23 @@ cd <project_directory>
 
 ```
 
-**2. Create and activate a virtual environment:**
+**2. Configure Environment Variables:**
+Copy the provided example environment file. You can leave the default values for local development or adjust them as needed.
+
+```bash
+cp .env.example .env
+
+```
+
+**3. Start Backing Services (Database & Redis):**
+The project uses Docker Compose to spin up PostgreSQL (with pgvector) and Redis (used as the Celery broker). Start them in the background:
+
+```bash
+docker compose up -d
+
+```
+
+**4. Create and activate a virtual environment:**
 
 ```bash
 python3.13 -m venv venv
@@ -36,21 +51,22 @@ source venv/bin/activate  # On Windows use: venv\Scripts\activate
 
 ```
 
-**3. Install dependencies:**
+**5. Install dependencies:**
 
 ```bash
 pip install -r requirements.txt
 
 ```
 
-**4. Run database migrations:**
+**6. Run database migrations:**
+*(Ensure your Docker containers from Step 3 are fully running before executing this)*
 
 ```bash
 python manage.py migrate
 
 ```
 
-**5. Create a superuser for the Admin Panel:**
+**7. Create a superuser for the Admin Panel:**
 
 ```bash
 python manage.py createsuperuser
@@ -120,9 +136,9 @@ Responsible for finding and extracting your target audience.
 
 The campaign execution engine.
 
-* **`MessageTemplate`:** Reusable texts or voice notes. Smartly handles Telegram `file_id` caching per account.
+* **`MessageTemplate`:** Reusable texts or voice notes. Smartly handles Telegram file caching per account via `JSONField`.
 * **`SenderTask`:** The main campaign. You select target sources, rotation accounts, daily limits, and the sequence of messages to send.
-* Uses **Connection Pooling** to keep MTProto connections alive during the campaign loop, drastically reducing the risk of bans.
+* Uses **Connection Pooling** to keep MTProto connections alive during the campaign loop, drastically reducing the risk of bans and TCP drops.
 
 ---
 
@@ -143,7 +159,7 @@ Once the system is running and you've added accounts via CLI, manage your operat
 1. Navigate to **Sender > Message Templates**.
 2. Create templates for your campaign.
 * *Example:* Create a "TEXT" template for an initial greeting.
-* *Example:* Create a "VOICE" template by uploading an `.ogg` file. The system will automatically handle the Telegram upload cache in the background.
+* *Example:* Create a "VOICE" template by uploading an `.ogg` file. The system will automatically handle the Telegram upload cache in the background for each rotating account.
 
 
 
