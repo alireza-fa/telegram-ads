@@ -72,6 +72,8 @@ class SenderLifecycleService:
         task = self.get_task_for_processing(task_id)
         task.mark_processing()
 
+        active_clients = {}
+
         try:
             message_chain = list(
                 task.taskmessage_set.select_related('message_template').order_by('order')
@@ -92,13 +94,33 @@ class SenderLifecycleService:
                     task.mark_failed("No ready Telegram account available for sending.")
                     return
 
+                if account.id not in active_clients:
+                    client = TelegramClient(account.session_path, account.api_id, account.api_hash)
+                    client.connect()
+
+                    if not client.is_user_authorized():
+                        self._restrict_account(
+                            account,
+                            reason="Account session is not authorized.",
+                            restricted_for=timedelta(days=3650),
+                        )
+                        client.disconnect()
+                        continue
+
+                    active_clients[account.id] = client
+
+                current_client = active_clients[account.id]
+
                 send_result = self._send_message_chain_to_user(
                     user=user,
                     account=account,
                     message_chain=message_chain,
+                    client=current_client
                 )
 
                 if send_result == "SPAM_RESTRICTED_ACCOUNT":
+                    current_client.disconnect()
+                    del active_clients[account.id]
                     continue
 
                 if send_result == "USER_FAILED":
@@ -118,8 +140,12 @@ class SenderLifecycleService:
             logger.exception("Unexpected sender execution error for SenderTask ID=%s", task_id)
             task.mark_failed(f"Unexpected Error: {str(exc)}")
 
-    @staticmethod
-    def _get_target_users_queryset(task: SenderTask):
+        finally:
+            for client_conn in active_clients.values():
+                if client_conn.is_connected():
+                    client_conn.disconnect()
+
+    def _get_target_users_queryset(self, task: SenderTask):
         source_ids = task.target_sources.values_list('id', flat=True)
 
         queryset = CrawledUser.objects.filter(
@@ -151,29 +177,17 @@ class SenderLifecycleService:
 
         return None
 
-    @staticmethod
-    def _refresh_account_restriction_state(account: TelegramAccount):
+    def _refresh_account_restriction_state(self, account: TelegramAccount):
         if account.is_restricted and account.restricted_until:
             if timezone.now() >= account.restricted_until:
                 account.is_restricted = False
                 account.restricted_until = None
                 account.save(update_fields=["is_restricted", "restricted_until", "updated_at"])
 
+    # متد دریافت کلاینت از ورودی را تغییر دادیم
     def _send_message_chain_to_user(self, user: CrawledUser, account: TelegramAccount,
-                                    message_chain: list[TaskMessage]):
-        client = TelegramClient(account.session_path, account.api_id, account.api_hash)
-
+                                    message_chain: list[TaskMessage], client: TelegramClient):
         try:
-            client.connect()
-
-            if not client.is_user_authorized():
-                self._restrict_account(
-                    account,
-                    reason="Account session is not authorized.",
-                    restricted_for=timedelta(days=3650),
-                )
-                return "SPAM_RESTRICTED_ACCOUNT"
-
             input_peer = user.username if user.username else user.telegram_id
 
             try:
@@ -188,7 +202,7 @@ class SenderLifecycleService:
                     client=client,
                     template=template,
                     peer_entity=peer_entity,
-                    account=account,
+                    account=account
                 )
 
                 intra_chain_delay = random.uniform(1.0, 2.5)
@@ -223,9 +237,6 @@ class SenderLifecycleService:
             self._mark_user_failed(user)
             return "USER_FAILED"
 
-        finally:
-            client.disconnect()
-
     def _send_single_template(self, client: TelegramClient, template: MessageTemplate, peer_entity,
                               account: TelegramAccount):
         if template.message_type == MessageType.TEXT:
@@ -257,8 +268,7 @@ class SenderLifecycleService:
 
         raise ValidationError(_("Unsupported message type."))
 
-    @staticmethod
-    def _cache_voice_in_saved_messages(client: TelegramClient, template: MessageTemplate,
+    def _cache_voice_in_saved_messages(self, client: TelegramClient, template: MessageTemplate,
                                        account: TelegramAccount) -> int:
         if not template.voice_file:
             raise ValidationError(_("Voice template has no uploaded file."))
@@ -270,7 +280,6 @@ class SenderLifecycleService:
         msg = client.send_file('me', upload_path, voice_note=True)
 
         acc_id_str = str(account.id)
-
         template.refresh_from_db(fields=['telegram_file_cache'])
         cache_data = template.telegram_file_cache or {}
         cache_data[acc_id_str] = msg.id
